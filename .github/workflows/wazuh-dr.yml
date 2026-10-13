@@ -16,6 +16,8 @@ on:
         description: 'If restoring, enter the exact tag (e.g., backup-2026-10-13-020000). Leave empty to restore the LATEST.'
         required: false
         type: string
+permissions:
+  contents: write
 
 jobs:
   # JOB 1: List Available Backups
