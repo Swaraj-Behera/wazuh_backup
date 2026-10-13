@@ -1,0 +1,74 @@
+name: Manual Restore
+
+on:
+  workflow_dispatch:
+    inputs:
+      backup_file:
+        description: 'Backup filename (leave empty for latest)'
+        required: false
+        type: string
+      confirm:
+        description: 'Type RESTORE to confirm'
+        required: true
+        type: string
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.confirm == 'RESTORE'
+    steps:
+      - name: Execute restore on WAZUHManager
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.WAZUH_VM_IP }}
+          username: ${{ secrets.WAZUH_VM_USER }}
+          key: ${{ secrets.WAZUH_VM_SSH_KEY }}
+          script: |
+            set -e
+            BACKUP_DIR="/var/backups/wazuh-dr"
+            KEY_FILE="/root/.config/wazuh-dr/backup-passphrase"
+            
+            if [[ -n "${{ inputs.backup_file }}" ]]; then
+              BACKUP="$BACKUP_DIR/${{ inputs.backup_file }}"
+            else
+              BACKUP=$(ls -t "$BACKUP_DIR"/wazuh-config-*.tar.gz.gpg | head -1)
+            fi
+            
+            echo "Restoring from: $BACKUP"
+            
+            # Verify integrity
+            cd "$BACKUP_DIR"
+            sha256sum -c "$(basename "$BACKUP" .tar.gz.gpg).sha256"
+            
+            # Decrypt and extract
+            WORK=$(mktemp -d)
+            gpg --batch --yes --pinentry-mode loopback \
+                --passphrase-file "$KEY_FILE" \
+                -o "$WORK/backup.tar.gz" -d "$BACKUP"
+            
+            # Safety backup of current config
+            sudo tar -czf "/var/backups/wazuh-pre-restore-$(date +%s).tar.gz" \
+                -C /var/ossec etc integrations active-response 2>/dev/null || true
+            
+            # Stop services
+            sudo systemctl stop wazuh-dashboard wazuh-manager wazuh-indexer
+            
+            # Restore
+            sudo tar -xzf "$WORK/backup.tar.gz" -C /var/ossec
+            sudo chown -R wazuh:wazuh /var/ossec/etc /var/ossec/integrations /var/ossec/active-response
+            
+            # Start services
+            sudo systemctl start wazuh-indexer
+            sleep 10
+            sudo systemctl start wazuh-manager
+            sleep 5
+            sudo systemctl start wazuh-dashboard
+            
+            rm -rf "$WORK"
+            
+            # Verify
+            sleep 10
+            for svc in wazuh-manager wazuh-indexer wazuh-dashboard; do
+              sudo systemctl is-active "$svc"
+            done
+            echo "✅ Restore complete"
