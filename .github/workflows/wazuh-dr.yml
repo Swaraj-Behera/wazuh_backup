@@ -18,10 +18,10 @@ on:
         type: string
 
 jobs:
-  # JOB 1: List Available Backups (Helps you see what to restore)
+  # JOB 1: List Available Backups
   list-backups:
     runs-on: ubuntu-latest
-    if: inputs.operation == 'list-backups' || inputs.operation == 'restore'
+    if: inputs.operation == 'list-backups'
     steps:
       - name: List all GitHub Releases
         run: |
@@ -31,15 +31,13 @@ jobs:
           gh release list --repo ${{ github.repository }} --limit 20 --json tagName,createdAt \
             --jq '.[] | select(.tagName | startswith("backup-")) | "\(.tagName)  |  Created: \(.createdAt[0:10])"'
           echo "========================================="
-          echo "Copy a tag from above to use in the 'release_tag' input."
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # JOB 2: Take Backup
+  # JOB 2: Take Backup (Fixed: Removed 'needs' so it runs independently)
   do-backup:
     runs-on: ubuntu-latest
     if: inputs.operation == 'backup'
-    needs: list-backups # Wait for list to finish so logs are clean
     steps:
       - name: Install sshpass
         run: sudo apt-get update && sudo apt-get install -y sshpass
@@ -70,6 +68,8 @@ jobs:
             --repo ${{ github.repository }} \
             --title "Wazuh Backup ${{ steps.create.outputs.tag }}" \
             --notes "Uploaded via Master Workflow"
+          
+          echo "✅ SUCCESS: Backup uploaded to GitHub Releases!"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -81,7 +81,6 @@ jobs:
   do-restore:
     runs-on: ubuntu-latest
     if: inputs.operation == 'restore'
-    needs: list-backups
     steps:
       - name: Install sshpass
         run: sudo apt-get update && sudo apt-get install -y sshpass
@@ -105,11 +104,9 @@ jobs:
 
       - name: Push to Wazuh VM & Execute Restore
         run: |
-          # Push files
           sshpass -p '${{ secrets.WAZUH_PASSWORD }}' scp -o StrictHostKeyChecking=no /tmp/wazuh-restore/*.tar.gz.gpg ${{ secrets.WAZUH_USER }}@${{ secrets.WAZUH_HOST }}:/tmp/
           sshpass -p '${{ secrets.WAZUH_PASSWORD }}' scp -o StrictHostKeyChecking=no /tmp/wazuh-restore/*.sha256 ${{ secrets.WAZUH_USER }}@${{ secrets.WAZUH_HOST }}:/tmp/
 
-          # Execute restore via SSH
           sshpass -p '${{ secrets.WAZUH_PASSWORD }}' ssh -o StrictHostKeyChecking=no ${{ secrets.WAZUH_USER }}@${{ secrets.WAZUH_HOST }} "sudo bash -c '
             BASE=\$(ls /tmp/*.tar.gz.gpg | head -1 | xargs basename | sed \"s/.tar.gz.gpg//\")
             KEY=\"/root/.config/wazuh-dr/backup-passphrase\"
