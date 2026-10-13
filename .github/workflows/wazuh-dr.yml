@@ -76,6 +76,12 @@ jobs:
       - name: Wipe from Wazuh VM
         run: |
           sshpass -p '${{ secrets.WAZUH_PASSWORD }}' ssh -o StrictHostKeyChecking=no ${{ secrets.WAZUH_USER }}@${{ secrets.WAZUH_HOST }} "sudo rm -f /tmp/${{ steps.create.outputs.base }}.tar.gz.gpg /tmp/${{ steps.create.outputs.base }}.sha256"
+      - name: Show Success Summary in UI
+        run:
+          echo "### ✅ Backup Successful!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Backup Tag:** ${{ steps.create.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Location:** Check the 'Releases' section on the right sidebar of this repository." >> $GI
 
   # JOB 3: Restore
   do-restore:
