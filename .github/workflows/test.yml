@@ -1,0 +1,24 @@
+name: Test Wazuh Server Connection
+
+on:
+  workflow_dispatch: # Allows you to run this manually
+
+jobs:
+  test-connection:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install sshpass
+        run: sudo apt-get update && sudo apt-get install -y sshpass
+
+      - name: Test SSH Connection to Wazuh VM
+        run: |
+          echo "🔄 Attempting to connect to ${{ secrets.WAZUH_HOST }} as ${{ secrets.WAZUH_USER }}..."
+          
+          # Run a simple command on the remote server to prove connection works
+          sshpass -p "${{ secrets.WAZUH_PASSWORD }}" ssh -o StrictHostKeyChecking=no ${{ secrets.WAZUH_USER }}@${{ secrets.WAZUH_HOST }} "
+            echo '✅ Connection Successful!'
+            echo 'Hostname:' \$(hostname)
+            echo 'Uptime:' \$(uptime)
+          "
+          
+          echo "🎉 SSH connection test passed! The GitHub runner can talk to your Wazuh VM."
