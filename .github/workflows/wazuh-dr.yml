@@ -83,7 +83,7 @@ jobs:
           echo "### ✅ Backup Successful!" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Backup Tag:** ${{ steps.create.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Location:** Check the 'Releases' section on the right sidebar of this repository." >> $GI
+          echo "**Location:** Check the 'Releases' section on the right sidebar of this repository." >> $GITHUB_STEP_SUMMARY
 
   # JOB 3: Restore
   do-restore:
