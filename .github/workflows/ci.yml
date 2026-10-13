@@ -1,0 +1,33 @@
+name: CI - Validate Scripts
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Lint bash scripts
+        run: |
+          shellcheck scripts/*.sh || true
+          # Fail only on errors, allow warnings
+          shellcheck -S error scripts/*.sh
+
+      - name: Validate bash syntax
+        run: |
+          for f in scripts/*.sh; do
+            echo "Checking $f"
+            bash -n "$f"
+          done
+
+      - name: Check systemd unit syntax
+        run: |
+          systemd-analyze verify scripts/wazuh-dr-daemon.service 2>&1 || true
