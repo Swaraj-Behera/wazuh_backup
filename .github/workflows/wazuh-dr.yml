@@ -1,0 +1,135 @@
+name: Wazuh DR Master Control
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: 'What do you want to do?'
+        required: true
+        default: 'backup'
+        type: choice
+        options:
+          - backup
+          - restore
+          - list-backups
+      release_tag:
+        description: 'If restoring, enter the exact tag (e.g., backup-2026-10-13-020000). Leave empty to restore the LATEST.'
+        required: false
+        type: string
+
+jobs:
+  # JOB 1: List Available Backups (Helps you see what to restore)
+  list-backups:
+    runs-on: ubuntu-latest
+    if: inputs.operation == 'list-backups' || inputs.operation == 'restore'
+    steps:
+      - name: List all GitHub Releases
+        run: |
+          echo "========================================="
+          echo " AVAILABLE BACKUPS IN GITHUB RELEASES "
+          echo "========================================="
+          gh release list --repo ${{ github.repository }} --limit 20 --json tagName,createdAt \
+            --jq '.[] | select(.tagName | startswith("backup-")) | "\(.tagName)  |  Created: \(.createdAt[0:10])"'
+          echo "========================================="
+          echo "Copy a tag from above to use in the 'release_tag' input."
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # JOB 2: Take Backup
+  do-backup:
+    runs-on: ubuntu-latest
+    if: inputs.operation == 'backup'
+    needs: list-backups # Wait for list to finish so logs are clean
+    steps:
+      - name: Install sshpass
+        run: sudo apt-get update && sudo apt-get install -y sshpass
+
+      - name: Create encrypted backup on Wazuh VM
+        id: create
+        run: |
+          STAMP=$(date +%F-%H%M%S)
+          BASE="wazuh-config-${STAMP}"
+          sshpass -p '${{ secrets.WAZUH_PASSWORD }}' ssh -o StrictHostKeyChecking=no ${{ secrets.WAZUH_USER }}@${{ secrets.WAZUH_HOST }} "sudo bash -c '
+            mkdir -p /root/.config/wazuh-dr
+            tar -czf /tmp/${BASE}.tar.gz -C /var/ossec etc integrations active-response
+            gpg --batch --yes --pinentry-mode loopback --passphrase-file /root/.config/wazuh-dr/backup-passphrase --symmetric --cipher-algo AES256 -o /tmp/${BASE}.tar.gz.gpg /tmp/${BASE}.tar.gz
+            sha256sum /tmp/${BASE}.tar.gz.gpg > /tmp/${BASE}.sha256
+            rm -f /tmp/${BASE}.tar.gz
+          '"
+          echo "base=${BASE}" >> $GITHUB_OUTPUT
+          echo "tag=backup-${STAMP}" >> $GITHUB_OUTPUT
+
+      - name: Pull to GitHub Cloud & Upload
+        run: |
+          mkdir -p /tmp/wazuh-dl
+          sshpass -p '${{ secrets.WAZUH_PASSWORD }}' scp -o StrictHostKeyChecking=no ${{ secrets.WAZUH_USER }}@${{ secrets.WAZUH_HOST }}:/tmp/${{ steps.create.outputs.base }}.tar.gz.gpg /tmp/wazuh-dl/
+          sshpass -p '${{ secrets.WAZUH_PASSWORD }}' scp -o StrictHostKeyChecking=no ${{ secrets.WAZUH_USER }}@${{ secrets.WAZUH_HOST }}:/tmp/${{ steps.create.outputs.base }}.sha256 /tmp/wazuh-dl/
+          
+          gh release create "${{ steps.create.outputs.tag }}" \
+            /tmp/wazuh-dl/*.tar.gz.gpg /tmp/wazuh-dl/*.sha256 \
+            --repo ${{ github.repository }} \
+            --title "Wazuh Backup ${{ steps.create.outputs.tag }}" \
+            --notes "Uploaded via Master Workflow"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Wipe from Wazuh VM
+        run: |
+          sshpass -p '${{ secrets.WAZUH_PASSWORD }}' ssh -o StrictHostKeyChecking=no ${{ secrets.WAZUH_USER }}@${{ secrets.WAZUH_HOST }} "sudo rm -f /tmp/${{ steps.create.outputs.base }}.tar.gz.gpg /tmp/${{ steps.create.outputs.base }}.sha256"
+
+  # JOB 3: Restore
+  do-restore:
+    runs-on: ubuntu-latest
+    if: inputs.operation == 'restore'
+    needs: list-backups
+    steps:
+      - name: Install sshpass
+        run: sudo apt-get update && sudo apt-get install -y sshpass
+
+      - name: Determine Tag & Download
+        id: download
+        run: |
+          if [[ -z "${{ inputs.release_tag }}" ]]; then
+            echo "No tag provided. Fetching the LATEST backup..."
+            TAG=$(gh release list --repo ${{ github.repository }} --limit 1 --json tagName --jq '.[0].tagName')
+          else
+            TAG="${{ inputs.release_tag }}"
+          fi
+          echo "Restoring tag: $TAG"
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          
+          mkdir -p /tmp/wazuh-restore
+          gh release download "$TAG" --repo ${{ github.repository }} --dir /tmp/wazuh-restore --pattern "*.tar.gz.gpg" --pattern "*.sha256"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push to Wazuh VM & Execute Restore
+        run: |
+          # Push files
+          sshpass -p '${{ secrets.WAZUH_PASSWORD }}' scp -o StrictHostKeyChecking=no /tmp/wazuh-restore/*.tar.gz.gpg ${{ secrets.WAZUH_USER }}@${{ secrets.WAZUH_HOST }}:/tmp/
+          sshpass -p '${{ secrets.WAZUH_PASSWORD }}' scp -o StrictHostKeyChecking=no /tmp/wazuh-restore/*.sha256 ${{ secrets.WAZUH_USER }}@${{ secrets.WAZUH_HOST }}:/tmp/
+
+          # Execute restore via SSH
+          sshpass -p '${{ secrets.WAZUH_PASSWORD }}' ssh -o StrictHostKeyChecking=no ${{ secrets.WAZUH_USER }}@${{ secrets.WAZUH_HOST }} "sudo bash -c '
+            BASE=\$(ls /tmp/*.tar.gz.gpg | head -1 | xargs basename | sed \"s/.tar.gz.gpg//\")
+            KEY=\"/root/.config/wazuh-dr/backup-passphrase\"
+            
+            echo \"Stopping services...\"
+            systemctl stop wazuh-dashboard wazuh-manager wazuh-indexer || true
+            sleep 5
+            
+            echo \"Decrypting and restoring...\"
+            gpg --batch --yes --pinentry-mode loopback --passphrase-file \$KEY -o /tmp/restore.tar.gz -d /tmp/\${BASE}.tar.gz.gpg
+            tar -xzf /tmp/restore.tar.gz -C /var/ossec
+            chown -R wazuh:wazuh /var/ossec/etc /var/ossec/integrations /var/ossec/active-response
+            
+            echo \"Cleaning up temp files...\"
+            rm -f /tmp/restore.tar.gz /tmp/\${BASE}.tar.gz.gpg /tmp/\${BASE}.sha256
+            
+            echo \"Starting services...\"
+            systemctl start wazuh-indexer && sleep 10
+            systemctl start wazuh-manager && sleep 5
+            systemctl start wazuh-dashboard
+            
+            echo \"Restore complete!\"
+          '"
